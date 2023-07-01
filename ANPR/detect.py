@@ -3,8 +3,9 @@ import os
 import cv2 
 import numpy as np
 import matplotlib
-from matplotlib import pyplot as plt
 import tensorflow as tf
+import easyocr
+from matplotlib import pyplot as plt
 from object_detection.utils import label_map_util
 from google.protobuf import text_format
 from object_detection.utils import visualization_utils as viz_utils
@@ -18,6 +19,8 @@ PRETRAINED_MODEL_NAME = 'ssd_mobilenet_v2_fpnlite_320x320_coco17_tpu-8'
 PRETRAINED_MODEL_URL = 'http://download.tensorflow.org/models/object_detection/tf2/20200711/ssd_mobilenet_v2_fpnlite_320x320_coco17_tpu-8.tar.gz'
 TF_RECORD_SCRIPT_NAME = 'generate_tfrecord.py'
 LABEL_MAP_NAME = 'label_map.pbtxt'
+tmpImage = None
+tmpDetection = None
 
 paths = {
     'WORKSPACE_PATH': os.path.join('Tensorflow', 'workspace'),
@@ -58,36 +61,95 @@ def detect_fn(image):
     return detections
 
 
-category_index = label_map_util.create_category_index_from_labelmap(files['LABELMAP'])
-IMAGE_PATH = os.path.join(paths['IMAGE_PATH'], 'test', 'Cars430.png')
+def read_image(imagepath):
+    global paths, files, labels, tmpImage, tmpDetection
 
-img = cv2.imread(IMAGE_PATH)
-image_np = np.array(img)
+    category_index = label_map_util.create_category_index_from_labelmap(files['LABELMAP'])
+    IMAGE_PATH = imagepath
 
-input_tensor = tf.convert_to_tensor(np.expand_dims(image_np, 0), dtype=tf.float32)
-detections = detect_fn(input_tensor)
+    img = cv2.imread(IMAGE_PATH)
+    image_np = np.array(img)
 
-num_detections = int(detections.pop('num_detections'))
-detections = {key: value[0, :num_detections].numpy()
-              for key, value in detections.items()}
-detections['num_detections'] = num_detections
+    input_tensor = tf.convert_to_tensor(np.expand_dims(image_np, 0), dtype=tf.float32)
+    detections = detect_fn(input_tensor)
 
-# detection_classes should be ints.
-detections['detection_classes'] = detections['detection_classes'].astype(np.int64)
+    num_detections = int(detections.pop('num_detections'))
+    detections = {key: value[0, :num_detections].numpy()
+                for key, value in detections.items()}
+    detections['num_detections'] = num_detections
 
-label_id_offset = 1
-image_np_with_detections = image_np.copy()
+    # detection_classes should be ints.
+    detections['detection_classes'] = detections['detection_classes'].astype(np.int64)
 
-viz_utils.visualize_boxes_and_labels_on_image_array(
-            image_np_with_detections,
-            detections['detection_boxes'],
-            detections['detection_classes']+label_id_offset,
-            detections['detection_scores'],
-            category_index,
-            use_normalized_coordinates=True,
-            max_boxes_to_draw=5,
-            min_score_thresh=.8,
-            agnostic_mode=False)
+    label_id_offset = 1
+    image_np_with_detections = image_np.copy()
+    
+    #load to global
+    tmpImage = image_np_with_detections
+    tmpDetection = detections
 
-plt.imshow(cv2.cvtColor(image_np_with_detections, cv2.COLOR_BGR2RGB))
-plt.show()
+    viz_utils.visualize_boxes_and_labels_on_image_array(
+                image_np_with_detections,
+                detections['detection_boxes'],
+                detections['detection_classes']+label_id_offset,
+                detections['detection_scores'],
+                category_index,
+                use_normalized_coordinates=True,
+                max_boxes_to_draw=5,
+                min_score_thresh=.8,
+                agnostic_mode=False)
+    resp = image_ocr()
+
+    return resp
+    #plt.imshow(cv2.cvtColor(image_np_with_detections, cv2.COLOR_BGR2RGB))
+    #plt.show()
+
+def image_ocr():
+    global tmpImage, tmpDetection
+
+    detection_treshold = .7
+
+    images = tmpImage
+    detections = tmpDetection
+    scores = list(filter(lambda x: x>detection_treshold, detections['detection_scores'])) #filter only surpass the treshold
+    boxes = detections['detection_boxes'][:len(scores)]
+    classes = detections['detection_classes'][:len(scores)]
+
+    height = images.shape[0]
+    width = images.shape[1]
+
+    plates = []
+    for i, box in enumerate(boxes):
+        roi = box*[height, width, height, width]
+        newImage = images[int(roi[0]): int(roi[2]), int(roi[1]): int(roi[3])] #get image using numPy array
+        #gray = cv2.cvtColor(newImage, cv2.COLOR_BGR2GRAY)
+        #(thresh, blackAndWhiteImage) = cv2.threshold(gray, 130, 255, cv2.THRESH_BINARY)
+        coloredImage = cv2.cvtColor(newImage, cv2.COLOR_BGR2RGB)
+        #coloredImage = blackAndWhiteImage
+        #implement ocr hereee
+        reader = easyocr.Reader(['en'])
+        result = reader.readtext(coloredImage)
+        result = filter_region(coloredImage, result) #filter the region first
+        plates.append(result)
+        #print("Plate Number: ", result) #final goddamn plate
+        #plt.imshow(coloredImage)
+
+    return plates
+
+def filter_region(ocr_image, ocr_result):
+
+    ocr_treshold = .5
+    result = []
+
+    #calculate image area
+    imageArea = ocr_image.shape[0]*ocr_image.shape[1]
+
+    for data in ocr_result:
+
+        length = np.sum(np.subtract(data[0][1], data[0][0]))
+        height = np.sum(np.subtract(data[0][2], data[0][1]))
+
+        if length*height / imageArea >= ocr_treshold:
+            result.append(data[1])
+    
+    return result
